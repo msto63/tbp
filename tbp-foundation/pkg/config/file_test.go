@@ -19,6 +19,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -34,7 +35,7 @@ func TestNewFileSource(t *testing.T) {
 			Optional: true,
 			Priority: 100,
 		}
-		
+
 		source, err := NewFileSource(opts)
 		require.NoError(t, err)
 		assert.Equal(t, "config.toml", source.GetPath())
@@ -135,7 +136,7 @@ tags = ["web", "api", "service"]
 		assert.Equal(t, int64(5432), values["database.port"])
 		assert.Equal(t, "testdb", values["database.name"])
 		assert.Equal(t, "require", values["database.ssl_mode"])
-		
+
 		// Test array handling - both original array and indexed access
 		tags, ok := values["array_example.tags"].([]interface{})
 		assert.True(t, ok)
@@ -143,7 +144,7 @@ tags = ["web", "api", "service"]
 		assert.Equal(t, "web", tags[0])
 		assert.Equal(t, "api", tags[1])
 		assert.Equal(t, "service", tags[2])
-		
+
 		// Test indexed access
 		assert.Equal(t, "web", values["array_example.tags.0"])
 		assert.Equal(t, "api", values["array_example.tags.1"])
@@ -184,7 +185,7 @@ tags = ["web", "api", "service"]
 		assert.Equal(t, "localhost", values["server.host"])
 		assert.Equal(t, float64(8080), values["server.port"]) // JSON numbers are float64
 		assert.Equal(t, "test", values["nested.deep.value"])
-		
+
 		// Test array with objects
 		assert.Equal(t, "item1", values["array_data.0.name"])
 		assert.Equal(t, float64(1), values["array_data.0.value"])
@@ -233,12 +234,12 @@ array_example:
 		assert.Equal(t, "localhost", values["server.host"])
 		assert.Equal(t, 8080, values["server.port"])
 		assert.Equal(t, "30s", values["server.timeout"])
-		
+
 		// Test arrays
 		assert.Equal(t, "web", values["array_example.tags.0"])
 		assert.Equal(t, "api", values["array_example.tags.1"])
 		assert.Equal(t, "service", values["array_example.tags.2"])
-		
+
 		// Test nested arrays with objects
 		assert.Equal(t, "server1", values["array_example.servers.0.name"])
 		assert.Equal(t, 8080, values["array_example.servers.0.port"])
@@ -599,10 +600,10 @@ func TestFileSource_WriteConfig(t *testing.T) {
 		require.NoError(t, err)
 
 		values := map[string]interface{}{
-			"environment":    "production",
-			"server.host":    "0.0.0.0",
-			"server.port":    9000,
-			"database.name":  "prod_db",
+			"environment":   "production",
+			"server.host":   "0.0.0.0",
+			"server.port":   9000,
+			"database.name": "prod_db",
 			"tags":          []interface{}{"prod", "live"},
 		}
 
@@ -629,9 +630,9 @@ func TestFileSource_WriteConfig(t *testing.T) {
 		require.NoError(t, err)
 
 		values := map[string]interface{}{
-			"environment":   "test",
-			"server.host":   "localhost",
-			"server.port":   8080,
+			"environment": "test",
+			"server.host": "localhost",
+			"server.port": 8080,
 		}
 
 		err = source.WriteConfig(values)
@@ -877,7 +878,7 @@ func BenchmarkFileSource_FlattenMap(b *testing.B) {
 				"port": 8080,
 				"config": map[string]interface{}{
 					"timeout": "30s",
-					"ssl": true,
+					"ssl":     true,
 				},
 			},
 			map[string]interface{}{
@@ -896,7 +897,7 @@ func BenchmarkFileSource_FlattenMap(b *testing.B) {
 
 func BenchmarkFileSource_ExpandEnvVars(b *testing.B) {
 	source := &FileSource{}
-	
+
 	// Set up environment variables
 	os.Setenv("TEST_HOST", "example.com")
 	os.Setenv("TEST_PORT", "8080")

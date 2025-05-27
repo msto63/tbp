@@ -23,7 +23,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -248,11 +247,11 @@ func (fs *FileSource) parseContent(content []byte, format string) (map[string]in
 func (fs *FileSource) substituteEnvVars(content []byte) ([]byte, error) {
 	// Regex to match ${VAR} and ${VAR:-default} patterns
 	envVarRegex := regexp.MustCompile(`\$\{([^}]+)\}`)
-	
+
 	result := envVarRegex.ReplaceAllFunc(content, func(match []byte) []byte {
 		// Extract variable specification (without ${})
 		varSpec := string(match[2 : len(match)-1])
-		
+
 		// Check for default value syntax (VAR:-default)
 		var varName, defaultValue string
 		if idx := strings.Index(varSpec, ":-"); idx != -1 {
@@ -261,48 +260,48 @@ func (fs *FileSource) substituteEnvVars(content []byte) ([]byte, error) {
 		} else {
 			varName = varSpec
 		}
-		
+
 		// Get environment variable value
 		if value := os.Getenv(varName); value != "" {
 			return []byte(value)
 		}
-		
+
 		// Return default value if provided, otherwise return original match
 		if defaultValue != "" {
 			return []byte(defaultValue)
 		}
-		
+
 		return match
 	})
-	
+
 	return result, nil
 }
 
 // flattenMap flattens nested maps into dot-separated keys and handles arrays with indexing
 func (fs *FileSource) flattenMap(data map[string]interface{}, prefix string) map[string]interface{} {
 	result := make(map[string]interface{})
-	
+
 	for key, value := range data {
 		fullKey := key
 		if prefix != "" {
 			fullKey = prefix + "." + key
 		}
-		
+
 		switch v := value.(type) {
 		case map[string]interface{}:
 			// Recursively flatten nested maps
 			for nestedKey, nestedValue := range fs.flattenMap(v, fullKey) {
 				result[nestedKey] = nestedValue
 			}
-			
+
 		case []interface{}:
 			// Handle arrays with indexed access
 			result[fullKey] = v // Keep original array
-			
+
 			// Add indexed access for each element
 			for i, arrayItem := range v {
 				indexedKey := fmt.Sprintf("%s.%d", fullKey, i)
-				
+
 				if nestedMap, ok := arrayItem.(map[string]interface{}); ok {
 					// Flatten nested objects in arrays
 					for nestedKey, nestedValue := range fs.flattenMap(nestedMap, indexedKey) {
@@ -313,13 +312,13 @@ func (fs *FileSource) flattenMap(data map[string]interface{}, prefix string) map
 					result[indexedKey] = arrayItem
 				}
 			}
-			
+
 		default:
 			// Simple value
 			result[fullKey] = value
 		}
 	}
-	
+
 	return result
 }
 
@@ -458,7 +457,7 @@ func (fs *FileSource) unflattenMap(flat map[string]interface{}) map[string]inter
 		if matched, _ := regexp.MatchString(`\.\d+(\.|$)`, key); matched {
 			continue
 		}
-		
+
 		parts := strings.Split(key, ".")
 		current := result
 
@@ -501,7 +500,7 @@ func (fs *FileSource) Validate() error {
 			}
 			return core.Wrapf(err, "cannot access configuration file %s", fs.path)
 		}
-		
+
 		// Try to parse the file to validate it
 		if err := fs.validateFileContent(); err != nil {
 			return core.Wrapf(err, "configuration file %s is invalid", fs.path)
@@ -570,7 +569,7 @@ func (fs *FileSource) IsWatchEnabled() bool {
 func (fs *FileSource) GetLastModified() (time.Time, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-	
+
 	if fs.lastModified.IsZero() {
 		info, err := os.Stat(fs.path)
 		if err != nil {
@@ -578,7 +577,7 @@ func (fs *FileSource) GetLastModified() (time.Time, error) {
 		}
 		return info.ModTime(), nil
 	}
-	
+
 	return fs.lastModified, nil
 }
 
