@@ -5,12 +5,13 @@
 //              environment variable substitution, and hierarchical configuration
 //              merging with validation and error handling.
 // Author: msto63 with Claude Sonnet 4.0
-// Version: v0.1.0
+// Version: v0.1.1
 // Created: 2025-05-26
-// Modified: 2025-05-26
+// Modified: 2025-05-27
 //
 // Change History:
 // - 2025-05-26 v0.1.0: Initial file-based configuration implementation
+// - 2025-05-27 v0.1.1: Fixed array handling, race conditions, and YAML support
 
 package config
 
@@ -22,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -60,14 +62,18 @@ type FileSource struct {
 
 	// stopWatching is used to stop the file watcher
 	stopWatching chan struct{}
+
+	// priority sets the source priority for merging
+	priority int
 }
 
 // FileSourceOptions configures file source creation
 type FileSourceOptions struct {
 	Path         string `json:"path"`
-	Format       string `json:"format"`       // toml, yaml, json, auto (default: auto)
-	Optional     bool   `json:"optional"`     // true if file is optional
+	Format       string `json:"format"`        // toml, yaml, json, auto (default: auto)
+	Optional     bool   `json:"optional"`      // true if file is optional
 	WatchEnabled bool   `json:"watch_enabled"` // true to enable file watching
+	Priority     int    `json:"priority"`      // source priority (default: 50)
 }
 
 // NewFileSource creates a new file-based configuration source
@@ -80,11 +86,30 @@ func NewFileSource(opts FileSourceOptions) (*FileSource, error) {
 		opts.Format = "auto"
 	}
 
+	// Set default priority if not specified
+	if opts.Priority == 0 {
+		opts.Priority = 50 // Medium priority by default
+	}
+
+	// Validate format early
+	validFormats := []string{"auto", "toml", "yaml", "json"}
+	isValidFormat := false
+	for _, validFormat := range validFormats {
+		if opts.Format == validFormat {
+			isValidFormat = true
+			break
+		}
+	}
+	if !isValidFormat {
+		return nil, core.Newf("unsupported configuration format: %s", opts.Format)
+	}
+
 	fs := &FileSource{
 		path:         opts.Path,
 		format:       opts.Format,
 		optional:     opts.Optional,
 		watchEnabled: opts.WatchEnabled,
+		priority:     opts.Priority,
 		values:       make(map[string]interface{}),
 		callbacks:    make([]func(map[string]interface{}), 0),
 		stopWatching: make(chan struct{}),
@@ -100,8 +125,7 @@ func (fs *FileSource) Name() string {
 
 // Priority implements the Source interface
 func (fs *FileSource) Priority() int {
-	// File sources have medium priority (higher than defaults, lower than env vars)
-	return 50
+	return fs.priority
 }
 
 // Load implements the Source interface
@@ -114,7 +138,8 @@ func (fs *FileSource) Load(ctx context.Context) (map[string]interface{}, error) 
 	if err != nil {
 		if os.IsNotExist(err) && fs.optional {
 			// File doesn't exist but is optional - return empty values
-			return make(map[string]interface{}), nil
+			fs.values = make(map[string]interface{})
+			return fs.copyValues(), nil
 		}
 		return nil, core.Wrapf(err, "failed to access configuration file %s", fs.path)
 	}
@@ -253,7 +278,7 @@ func (fs *FileSource) substituteEnvVars(content []byte) ([]byte, error) {
 	return result, nil
 }
 
-// flattenMap flattens nested maps into dot-separated keys
+// flattenMap flattens nested maps into dot-separated keys and handles arrays with indexing
 func (fs *FileSource) flattenMap(data map[string]interface{}, prefix string) map[string]interface{} {
 	result := make(map[string]interface{})
 	
@@ -263,12 +288,34 @@ func (fs *FileSource) flattenMap(data map[string]interface{}, prefix string) map
 			fullKey = prefix + "." + key
 		}
 		
-		if nestedMap, ok := value.(map[string]interface{}); ok {
+		switch v := value.(type) {
+		case map[string]interface{}:
 			// Recursively flatten nested maps
-			for nestedKey, nestedValue := range fs.flattenMap(nestedMap, fullKey) {
+			for nestedKey, nestedValue := range fs.flattenMap(v, fullKey) {
 				result[nestedKey] = nestedValue
 			}
-		} else {
+			
+		case []interface{}:
+			// Handle arrays with indexed access
+			result[fullKey] = v // Keep original array
+			
+			// Add indexed access for each element
+			for i, arrayItem := range v {
+				indexedKey := fmt.Sprintf("%s.%d", fullKey, i)
+				
+				if nestedMap, ok := arrayItem.(map[string]interface{}); ok {
+					// Flatten nested objects in arrays
+					for nestedKey, nestedValue := range fs.flattenMap(nestedMap, indexedKey) {
+						result[nestedKey] = nestedValue
+					}
+				} else {
+					// Simple array element
+					result[indexedKey] = arrayItem
+				}
+			}
+			
+		default:
+			// Simple value
 			result[fullKey] = value
 		}
 	}
@@ -313,6 +360,7 @@ func (fs *FileSource) checkForChanges(ctx context.Context) {
 		return
 	}
 
+	// Thread-safe read of last modified time
 	fs.mu.RLock()
 	lastModified := fs.lastModified
 	fs.mu.RUnlock()
@@ -326,7 +374,7 @@ func (fs *FileSource) checkForChanges(ctx context.Context) {
 			return
 		}
 
-		// Notify callbacks
+		// Notify callbacks with thread-safe access
 		fs.mu.RLock()
 		callbacks := make([]func(map[string]interface{}), len(fs.callbacks))
 		copy(callbacks, fs.callbacks)
@@ -406,6 +454,11 @@ func (fs *FileSource) unflattenMap(flat map[string]interface{}) map[string]inter
 	result := make(map[string]interface{})
 
 	for key, value := range flat {
+		// Skip indexed keys (they'll be recreated from array values)
+		if matched, _ := regexp.MatchString(`\.\d+(\.|$)`, key); matched {
+			continue
+		}
+		
 		parts := strings.Split(key, ".")
 		current := result
 
@@ -413,7 +466,12 @@ func (fs *FileSource) unflattenMap(flat map[string]interface{}) map[string]inter
 		for i, part := range parts {
 			if i == len(parts)-1 {
 				// Last part, set the value
-				current[part] = value
+				// Handle arrays specially
+				if arr, ok := value.([]interface{}); ok {
+					current[part] = arr
+				} else {
+					current[part] = value
+				}
 			} else {
 				// Intermediate part, ensure nested map exists
 				if _, exists := current[part]; !exists {
@@ -443,6 +501,11 @@ func (fs *FileSource) Validate() error {
 			}
 			return core.Wrapf(err, "cannot access configuration file %s", fs.path)
 		}
+		
+		// Try to parse the file to validate it
+		if err := fs.validateFileContent(); err != nil {
+			return core.Wrapf(err, "configuration file %s is invalid", fs.path)
+		}
 	}
 
 	// Validate format
@@ -459,6 +522,28 @@ func (fs *FileSource) Validate() error {
 	}
 
 	return nil
+}
+
+// validateFileContent validates that the file can be parsed
+func (fs *FileSource) validateFileContent() error {
+	content, err := os.ReadFile(fs.path)
+	if err != nil {
+		return err
+	}
+
+	format := fs.format
+	if format == "auto" {
+		format = fs.detectFormat()
+	}
+
+	_, err = fs.parseContent(content, format)
+	return err
+}
+
+// Exists checks if the configuration file exists
+func (fs *FileSource) Exists() bool {
+	_, err := os.Stat(fs.path)
+	return err == nil
 }
 
 // GetPath returns the file path
@@ -482,10 +567,19 @@ func (fs *FileSource) IsWatchEnabled() bool {
 }
 
 // GetLastModified returns the last modification time
-func (fs *FileSource) GetLastModified() time.Time {
+func (fs *FileSource) GetLastModified() (time.Time, error) {
 	fs.mu.RLock()
 	defer fs.mu.RUnlock()
-	return fs.lastModified
+	
+	if fs.lastModified.IsZero() {
+		info, err := os.Stat(fs.path)
+		if err != nil {
+			return time.Time{}, err
+		}
+		return info.ModTime(), nil
+	}
+	
+	return fs.lastModified, nil
 }
 
 // LoadFromReader loads configuration from an io.Reader (useful for testing)

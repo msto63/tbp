@@ -1,16 +1,17 @@
 // File: env.go
 // Title: Environment Variable Configuration for TBP
 // Description: Provides environment variable-based configuration source with
-//              type conversion, prefix filtering, nested key mapping, and
-//              validation. Supports standard environment variable patterns
+//              comprehensive type conversion, prefix filtering, nested key mapping,
+//              and validation. Supports standard environment variable patterns
 //              with automatic type detection and secure handling.
 // Author: msto63 with Claude Sonnet 4.0
-// Version: v0.1.0
+// Version: v0.1.1
 // Created: 2025-05-26
-// Modified: 2025-05-26
+// Modified: 2025-05-27
 //
 // Change History:
 // - 2025-05-26 v0.1.0: Initial environment variable configuration implementation
+// - 2025-05-27 v0.1.1: Enhanced type conversions, better error handling, expanded type support
 
 package config
 
@@ -47,6 +48,9 @@ type EnvSource struct {
 
 	// caseSensitive determines whether key matching is case-sensitive
 	caseSensitive bool
+
+	// priority sets the source priority for merging
+	priority int
 }
 
 // EnvSourceOptions configures environment variable source creation
@@ -56,6 +60,7 @@ type EnvSourceOptions struct {
 	KeyMapping    map[string]string `json:"key_mapping"`    // Custom key mappings
 	TypeHints     map[string]string `json:"type_hints"`     // Type hints for conversion
 	CaseSensitive bool              `json:"case_sensitive"` // Case-sensitive key matching
+	Priority      int               `json:"priority"`       // Source priority (default: 100)
 }
 
 // NewEnvSource creates a new environment variable-based configuration source
@@ -68,6 +73,11 @@ func NewEnvSource(opts EnvSourceOptions) (*EnvSource, error) {
 		opts.Separator = "_"
 	}
 
+	// Set default priority if not specified
+	if opts.Priority == 0 {
+		opts.Priority = 100 // High priority by default
+	}
+
 	// Ensure prefix ends with separator for consistent matching
 	if !strings.HasSuffix(opts.Prefix, opts.Separator) {
 		opts.Prefix += opts.Separator
@@ -76,6 +86,7 @@ func NewEnvSource(opts EnvSourceOptions) (*EnvSource, error) {
 	es := &EnvSource{
 		prefix:        opts.Prefix,
 		separator:     opts.Separator,
+		priority:      opts.Priority,
 		values:        make(map[string]interface{}),
 		keyMapping:    opts.KeyMapping,
 		typeHints:     opts.TypeHints,
@@ -100,8 +111,7 @@ func (es *EnvSource) Name() string {
 
 // Priority implements the Source interface
 func (es *EnvSource) Priority() int {
-	// Environment variables have high priority (override file config)
-	return 100
+	return es.priority
 }
 
 // Load implements the Source interface
@@ -153,7 +163,8 @@ func (es *EnvSource) Load(ctx context.Context) (map[string]interface{}, error) {
 // Watch implements the Source interface
 func (es *EnvSource) Watch(ctx context.Context, callback func(map[string]interface{})) error {
 	// Environment variables don't typically change during runtime,
-	// but we can implement polling if needed
+	// so we don't implement active watching by default
+	// This could be extended with polling if needed
 	return nil
 }
 
@@ -167,6 +178,11 @@ func (es *EnvSource) matchesPrefix(envKey string) bool {
 
 // envKeyToConfigKey converts an environment variable name to a configuration key
 func (es *EnvSource) envKeyToConfigKey(envKey string) string {
+	// Check for custom key mapping first
+	if mappedKey, exists := es.keyMapping[envKey]; exists {
+		return mappedKey
+	}
+
 	// Remove prefix
 	var key string
 	if es.caseSensitive {
@@ -175,11 +191,6 @@ func (es *EnvSource) envKeyToConfigKey(envKey string) string {
 		upperEnvKey := strings.ToUpper(envKey)
 		upperPrefix := strings.ToUpper(es.prefix)
 		key = strings.TrimPrefix(upperEnvKey, upperPrefix)
-	}
-
-	// Check for custom key mapping
-	if mappedKey, exists := es.keyMapping[envKey]; exists {
-		return mappedKey
 	}
 
 	// Convert UPPER_CASE_WITH_UNDERSCORES to dot.separated.lowercase
@@ -203,7 +214,7 @@ func (es *EnvSource) convertValue(key, value string) (interface{}, error) {
 // convertByType converts a value based on an explicit type hint
 func (es *EnvSource) convertByType(value, typeHint string) (interface{}, error) {
 	switch strings.ToLower(typeHint) {
-	case "string":
+	case "string", "str":
 		return value, nil
 
 	case "int", "integer":
@@ -213,12 +224,75 @@ func (es *EnvSource) convertByType(value, typeHint string) (interface{}, error) 
 		}
 		return intVal, nil
 
+	case "int8":
+		intVal, err := strconv.ParseInt(value, 10, 8)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to int8", value)
+		}
+		return int8(intVal), nil
+
+	case "int16":
+		intVal, err := strconv.ParseInt(value, 10, 16)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to int16", value)
+		}
+		return int16(intVal), nil
+
+	case "int32":
+		intVal, err := strconv.ParseInt(value, 10, 32)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to int32", value)
+		}
+		return int32(intVal), nil
+
 	case "int64":
 		intVal, err := strconv.ParseInt(value, 10, 64)
 		if err != nil {
 			return nil, core.Wrapf(err, "failed to convert '%s' to int64", value)
 		}
 		return intVal, nil
+
+	case "uint", "unsigned":
+		uintVal, err := strconv.ParseUint(value, 10, 0)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to uint", value)
+		}
+		return uint(uintVal), nil
+
+	case "uint8":
+		uintVal, err := strconv.ParseUint(value, 10, 8)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to uint8", value)
+		}
+		return uint8(uintVal), nil
+
+	case "uint16":
+		uintVal, err := strconv.ParseUint(value, 10, 16)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to uint16", value)
+		}
+		return uint16(uintVal), nil
+
+	case "uint32":
+		uintVal, err := strconv.ParseUint(value, 10, 32)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to uint32", value)
+		}
+		return uint32(uintVal), nil
+
+	case "uint64":
+		uintVal, err := strconv.ParseUint(value, 10, 64)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to uint64", value)
+		}
+		return uintVal, nil
+
+	case "float32":
+		floatVal, err := strconv.ParseFloat(value, 32)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' to float32", value)
+		}
+		return float32(floatVal), nil
 
 	case "float", "float64":
 		floatVal, err := strconv.ParseFloat(value, 64)
@@ -237,46 +311,80 @@ func (es *EnvSource) convertByType(value, typeHint string) (interface{}, error) 
 		}
 		return duration, nil
 
-	case "stringslice", "[]string":
+	case "time", "timestamp":
+		// Try multiple time formats
+		timeFormats := []string{
+			time.RFC3339,
+			time.RFC3339Nano,
+			"2006-01-02T15:04:05Z",
+			"2006-01-02 15:04:05",
+			"2006-01-02",
+		}
+		
+		for _, format := range timeFormats {
+			if t, err := time.Parse(format, value); err == nil {
+				return t, nil
+			}
+		}
+		return nil, core.Newf("failed to parse '%s' as time - supported formats: RFC3339, ISO date", value)
+
+	case "stringslice", "[]string", "strings":
 		return es.parseStringSlice(value), nil
 
-	case "intslice", "[]int":
+	case "intslice", "[]int", "integers":
 		return es.parseIntSlice(value)
 
+	case "floatslice", "[]float64", "floats":
+		return es.parseFloatSlice(value)
+
+	case "boolslice", "[]bool", "booleans":
+		return es.parseBoolSlice(value)
+
 	default:
-		return nil, core.Newf("unsupported type hint: %s", typeHint)
+		return nil, core.Newf("unsupported type hint '%s' - supported types: string, int, int8, int16, int32, int64, uint, uint8, uint16, uint32, uint64, float32, float64, bool, duration, time, stringslice, intslice, floatslice, boolslice", typeHint)
 	}
 }
 
 // autoConvertValue automatically detects and converts the value type
 func (es *EnvSource) autoConvertValue(value string) interface{} {
+	// Empty string stays as string
+	if value == "" {
+		return value
+	}
+
 	// Try boolean first (common for environment variables)
 	if boolVal, err := es.parseBool(value); err == nil {
 		return boolVal
 	}
 
-	// Try integer
-	if intVal, err := strconv.Atoi(value); err == nil {
-		return intVal
+	// Try integer (but avoid converting things like "123.0" to int)
+	if !strings.Contains(value, ".") {
+		if intVal, err := strconv.ParseInt(value, 10, 64); err == nil {
+			// Return appropriate int type based on size
+			if intVal >= -2147483648 && intVal <= 2147483647 {
+				return int(intVal)
+			}
+			return intVal
+		}
 	}
 
 	// Try float
 	if floatVal, err := strconv.ParseFloat(value, 64); err == nil {
-		// Only return float if it has decimal places
-		if strings.Contains(value, ".") {
-			return floatVal
-		}
+		return floatVal
 	}
 
 	// Try duration (if it looks like a duration)
-	if strings.ContainsAny(value, "hms") || strings.HasSuffix(value, "us") || strings.HasSuffix(value, "ns") {
+	if strings.ContainsAny(value, "hms") || 
+	   strings.HasSuffix(value, "us") || 
+	   strings.HasSuffix(value, "ns") || 
+	   strings.HasSuffix(value, "µs") {
 		if duration, err := time.ParseDuration(value); err == nil {
 			return duration
 		}
 	}
 
 	// Check if it's a comma-separated list
-	if strings.Contains(value, ",") {
+	if strings.Contains(value, ",") && len(strings.Split(value, ",")) > 1 {
 		return es.parseStringSlice(value)
 	}
 
@@ -288,12 +396,12 @@ func (es *EnvSource) autoConvertValue(value string) interface{} {
 func (es *EnvSource) parseBool(value string) (bool, error) {
 	lower := strings.ToLower(strings.TrimSpace(value))
 	switch lower {
-	case "true", "yes", "1", "on", "enable", "enabled":
+	case "true", "yes", "1", "on", "enable", "enabled", "y", "t":
 		return true, nil
-	case "false", "no", "0", "off", "disable", "disabled", "":
+	case "false", "no", "0", "off", "disable", "disabled", "n", "f", "":
 		return false, nil
 	default:
-		return false, core.Newf("cannot convert '%s' to boolean", value)
+		return false, core.Newf("cannot convert '%s' to boolean - supported values: true/false, yes/no, 1/0, on/off, enable/disable", value)
 	}
 }
 
@@ -308,7 +416,16 @@ func (es *EnvSource) parseStringSlice(value string) []string {
 	for i, part := range parts {
 		result[i] = strings.TrimSpace(part)
 	}
-	return result
+	
+	// Remove empty strings
+	filtered := make([]string, 0, len(result))
+	for _, s := range result {
+		if s != "" {
+			filtered = append(filtered, s)
+		}
+	}
+	
+	return filtered
 }
 
 // parseIntSlice parses a comma-separated string into a slice of integers
@@ -318,15 +435,71 @@ func (es *EnvSource) parseIntSlice(value string) ([]int, error) {
 	}
 
 	parts := strings.Split(value, ",")
-	result := make([]int, len(parts))
+	result := make([]int, 0, len(parts))
+	
 	for i, part := range parts {
 		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue // Skip empty parts
+		}
+		
 		intVal, err := strconv.Atoi(trimmed)
 		if err != nil {
-			return nil, core.Wrapf(err, "failed to convert '%s' to integer in slice", trimmed)
+			return nil, core.Wrapf(err, "failed to convert '%s' (element %d) to integer in slice", trimmed, i)
 		}
-		result[i] = intVal
+		result = append(result, intVal)
 	}
+	
+	return result, nil
+}
+
+// parseFloatSlice parses a comma-separated string into a slice of float64
+func (es *EnvSource) parseFloatSlice(value string) ([]float64, error) {
+	if value == "" {
+		return []float64{}, nil
+	}
+
+	parts := strings.Split(value, ",")
+	result := make([]float64, 0, len(parts))
+	
+	for i, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue // Skip empty parts
+		}
+		
+		floatVal, err := strconv.ParseFloat(trimmed, 64)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' (element %d) to float in slice", trimmed, i)
+		}
+		result = append(result, floatVal)
+	}
+	
+	return result, nil
+}
+
+// parseBoolSlice parses a comma-separated string into a slice of booleans
+func (es *EnvSource) parseBoolSlice(value string) ([]bool, error) {
+	if value == "" {
+		return []bool{}, nil
+	}
+
+	parts := strings.Split(value, ",")
+	result := make([]bool, 0, len(parts))
+	
+	for i, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed == "" {
+			continue // Skip empty parts
+		}
+		
+		boolVal, err := es.parseBool(trimmed)
+		if err != nil {
+			return nil, core.Wrapf(err, "failed to convert '%s' (element %d) to boolean in slice", trimmed, i)
+		}
+		result = append(result, boolVal)
+	}
+	
 	return result, nil
 }
 
@@ -339,7 +512,7 @@ func (es *EnvSource) copyValues() map[string]interface{} {
 	return result
 }
 
-// GetPrefix returns the environment variable prefix
+// GetPrefix returns the environment variable prefix (without separator)
 func (es *EnvSource) GetPrefix() string {
 	return strings.TrimSuffix(es.prefix, es.separator)
 }
@@ -394,7 +567,7 @@ func (es *EnvSource) ValidateEnvironment(requiredKeys []string) error {
 	for _, key := range requiredKeys {
 		// Convert config key back to environment variable name
 		envKey := es.configKeyToEnvKey(key)
-		if os.Getenv(envKey) == "" {
+		if _, exists := os.LookupEnv(envKey); !exists {
 			missing = append(missing, envKey)
 		}
 	}
@@ -471,4 +644,21 @@ func (es *EnvSource) SetEnvironmentVariable(configKey string, value string) erro
 func (es *EnvSource) UnsetEnvironmentVariable(configKey string) error {
 	envKey := es.configKeyToEnvKey(configKey)
 	return os.Unsetenv(envKey)
+}
+
+// GetSupportedTypes returns a list of all supported type hints
+func (es *EnvSource) GetSupportedTypes() []string {
+	return []string{
+		"string", "str",
+		"int", "integer", "int8", "int16", "int32", "int64",
+		"uint", "unsigned", "uint8", "uint16", "uint32", "uint64",
+		"float32", "float", "float64",
+		"bool", "boolean",
+		"duration",
+		"time", "timestamp",
+		"stringslice", "[]string", "strings",
+		"intslice", "[]int", "integers",
+		"floatslice", "[]float64", "floats",
+		"boolslice", "[]bool", "booleans",
+	}
 }

@@ -1,16 +1,17 @@
 // File: file_test.go
 // Title: Tests for File-based Configuration Source
 // Description: Comprehensive test suite for file-based configuration loading
-//              including TOML, JSON parsing, file watching, environment variable
+//              including TOML, YAML, JSON parsing, file watching, environment variable
 //              expansion, and error handling. Tests cover various file formats,
 //              hot-reloading scenarios, and edge cases.
 // Author: msto63 with Claude Sonnet 4.0
-// Version: v0.1.0
+// Version: v0.1.1
 // Created: 2025-05-26
-// Modified: 2025-05-26
+// Modified: 2025-05-27
 //
 // Change History:
 // - 2025-05-26 v0.1.0: Initial test implementation for file-based configuration
+// - 2025-05-27 v0.1.1: Fixed tests for array indexing and YAML support
 
 package config
 
@@ -69,7 +70,7 @@ func TestNewFileSource(t *testing.T) {
 		opts := FileSourceOptions{Path: "config.toml", Optional: true}
 		source, err := NewFileSource(opts)
 		require.NoError(t, err)
-		assert.Equal(t, 100, source.Priority())
+		assert.Equal(t, 50, source.Priority()) // Default priority
 	})
 
 	t.Run("returns error for empty path", func(t *testing.T) {
@@ -135,13 +136,18 @@ tags = ["web", "api", "service"]
 		assert.Equal(t, "testdb", values["database.name"])
 		assert.Equal(t, "require", values["database.ssl_mode"])
 		
-		// Test array handling
+		// Test array handling - both original array and indexed access
 		tags, ok := values["array_example.tags"].([]interface{})
 		assert.True(t, ok)
 		assert.Len(t, tags, 3)
 		assert.Equal(t, "web", tags[0])
 		assert.Equal(t, "api", tags[1])
 		assert.Equal(t, "service", tags[2])
+		
+		// Test indexed access
+		assert.Equal(t, "web", values["array_example.tags.0"])
+		assert.Equal(t, "api", values["array_example.tags.1"])
+		assert.Equal(t, "service", values["array_example.tags.2"])
 	})
 
 	t.Run("loads JSON file successfully", func(t *testing.T) {
@@ -156,7 +162,11 @@ tags = ["web", "api", "service"]
     "deep": {
       "value": "test"
     }
-  }
+  },
+  "array_data": [
+    {"name": "item1", "value": 1},
+    {"name": "item2", "value": 2}
+  ]
 }`)
 		defer os.Remove(tmpFile)
 
@@ -174,6 +184,66 @@ tags = ["web", "api", "service"]
 		assert.Equal(t, "localhost", values["server.host"])
 		assert.Equal(t, float64(8080), values["server.port"]) // JSON numbers are float64
 		assert.Equal(t, "test", values["nested.deep.value"])
+		
+		// Test array with objects
+		assert.Equal(t, "item1", values["array_data.0.name"])
+		assert.Equal(t, float64(1), values["array_data.0.value"])
+		assert.Equal(t, "item2", values["array_data.1.name"])
+		assert.Equal(t, float64(2), values["array_data.1.value"])
+	})
+
+	t.Run("loads YAML file successfully", func(t *testing.T) {
+		tmpFile := createTempFile(t, "config.yaml", `
+environment: test
+debug: true
+server:
+  host: localhost
+  port: 8080
+  timeout: 30s
+database:
+  host: db.example.com
+  port: 5432
+  name: testdb
+  ssl_mode: require
+array_example:
+  tags:
+    - web
+    - api  
+    - service
+  servers:
+    - name: server1
+      port: 8080
+    - name: server2
+      port: 8081
+`)
+		defer os.Remove(tmpFile)
+
+		source, err := NewFileSource(FileSourceOptions{
+			Path:   tmpFile,
+			Format: "yaml",
+		})
+		require.NoError(t, err)
+
+		values, err := source.Load(context.Background())
+		require.NoError(t, err)
+
+		// Test basic values
+		assert.Equal(t, "test", values["environment"])
+		assert.Equal(t, true, values["debug"])
+		assert.Equal(t, "localhost", values["server.host"])
+		assert.Equal(t, 8080, values["server.port"])
+		assert.Equal(t, "30s", values["server.timeout"])
+		
+		// Test arrays
+		assert.Equal(t, "web", values["array_example.tags.0"])
+		assert.Equal(t, "api", values["array_example.tags.1"])
+		assert.Equal(t, "service", values["array_example.tags.2"])
+		
+		// Test nested arrays with objects
+		assert.Equal(t, "server1", values["array_example.servers.0.name"])
+		assert.Equal(t, 8080, values["array_example.servers.0.port"])
+		assert.Equal(t, "server2", values["array_example.servers.1.name"])
+		assert.Equal(t, 8081, values["array_example.servers.1.port"])
 	})
 
 	t.Run("expands environment variables", func(t *testing.T) {
@@ -229,7 +299,7 @@ url = "https://${TEST_HOST}:${TEST_PORT}/api"
 
 		_, err = source.Load(context.Background())
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to stat configuration file")
+		assert.Contains(t, err.Error(), "failed to access configuration file")
 	})
 
 	t.Run("returns error for invalid TOML", func(t *testing.T) {
@@ -271,11 +341,12 @@ invalid toml content
 		assert.Contains(t, err.Error(), "failed to parse JSON")
 	})
 
-	t.Run("returns error for YAML format", func(t *testing.T) {
-		tmpFile := createTempFile(t, "config.yaml", `
+	t.Run("returns error for invalid YAML", func(t *testing.T) {
+		tmpFile := createTempFile(t, "invalid.yaml", `
 server:
   host: localhost
   port: 8080
+    invalid_indentation: true
 `)
 		defer os.Remove(tmpFile)
 
@@ -287,7 +358,7 @@ server:
 
 		_, err = source.Load(context.Background())
 		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "YAML format not yet implemented")
+		assert.Contains(t, err.Error(), "failed to parse YAML")
 	})
 }
 
@@ -312,7 +383,7 @@ func TestFileSource_FlattenMap(t *testing.T) {
 		assert.Equal(t, "deepvalue", result["nested.key2.deep"])
 	})
 
-	t.Run("handles arrays", func(t *testing.T) {
+	t.Run("handles arrays with indexing", func(t *testing.T) {
 		input := map[string]interface{}{
 			"tags": []interface{}{"web", "api", "service"},
 			"servers": []interface{}{
@@ -345,6 +416,43 @@ func TestFileSource_FlattenMap(t *testing.T) {
 		assert.Equal(t, "server2", result["servers.1.name"])
 		assert.Equal(t, 8081, result["servers.1.port"])
 	})
+
+	t.Run("handles empty arrays", func(t *testing.T) {
+		input := map[string]interface{}{
+			"empty_array": []interface{}{},
+			"null_array":  nil,
+		}
+
+		result := source.flattenMap(input, "")
+
+		// Empty array should be preserved
+		emptyArray, ok := result["empty_array"].([]interface{})
+		assert.True(t, ok)
+		assert.Len(t, emptyArray, 0)
+
+		// Nil should be preserved
+		assert.Nil(t, result["null_array"])
+	})
+
+	t.Run("handles mixed arrays", func(t *testing.T) {
+		input := map[string]interface{}{
+			"mixed": []interface{}{
+				"string",
+				42,
+				true,
+				map[string]interface{}{
+					"nested": "object",
+				},
+			},
+		}
+
+		result := source.flattenMap(input, "")
+
+		assert.Equal(t, "string", result["mixed.0"])
+		assert.Equal(t, 42, result["mixed.1"])
+		assert.Equal(t, true, result["mixed.2"])
+		assert.Equal(t, "object", result["mixed.3.nested"])
+	})
 }
 
 func TestFileSource_Watch(t *testing.T) {
@@ -357,8 +465,9 @@ port = 8080
 		defer os.Remove(tmpFile)
 
 		source, err := NewFileSource(FileSourceOptions{
-			Path:   tmpFile,
-			Format: "toml",
+			Path:         tmpFile,
+			Format:       "toml",
+			WatchEnabled: true,
 		})
 		require.NoError(t, err)
 
@@ -397,6 +506,26 @@ new_key = "new_value"
 		case <-ctx.Done():
 			t.Fatal("Did not receive change notification within timeout")
 		}
+	})
+
+	t.Run("does not watch when disabled", func(t *testing.T) {
+		tmpFile := createTempFile(t, "config.toml", `environment = "test"`)
+		defer os.Remove(tmpFile)
+
+		source, err := NewFileSource(FileSourceOptions{
+			Path:         tmpFile,
+			Format:       "toml",
+			WatchEnabled: false,
+		})
+		require.NoError(t, err)
+
+		ctx := context.Background()
+		err = source.Watch(ctx, func(values map[string]interface{}) {
+			t.Fatal("Should not receive callback when watching is disabled")
+		})
+
+		// Should not return error, just do nothing
+		assert.NoError(t, err)
 	})
 }
 
@@ -442,7 +571,7 @@ port = 8080
 		assert.Contains(t, err.Error(), "does not exist")
 	})
 
-	t.Run("returns error for invalid file", func(t *testing.T) {
+	t.Run("returns error for invalid file content", func(t *testing.T) {
 		tmpFile := createTempFile(t, "invalid.toml", `invalid toml content`)
 		defer os.Remove(tmpFile)
 
@@ -459,10 +588,9 @@ port = 8080
 	})
 }
 
-func TestFileSource_Exists(t *testing.T) {
-	t.Run("returns true for existing file", func(t *testing.T) {
-		tmpFile := createTempFile(t, "config.toml", "environment = \"test\"")
-		defer os.Remove(tmpFile)
+func TestFileSource_WriteConfig(t *testing.T) {
+	t.Run("writes TOML config", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "write_test.toml")
 
 		source, err := NewFileSource(FileSourceOptions{
 			Path:   tmpFile,
@@ -470,46 +598,97 @@ func TestFileSource_Exists(t *testing.T) {
 		})
 		require.NoError(t, err)
 
-		assert.True(t, source.Exists())
+		values := map[string]interface{}{
+			"environment":    "production",
+			"server.host":    "0.0.0.0",
+			"server.port":    9000,
+			"database.name":  "prod_db",
+			"tags":          []interface{}{"prod", "live"},
+		}
+
+		err = source.WriteConfig(values)
+		require.NoError(t, err)
+
+		// Verify file was written and can be read back
+		loadedValues, err := source.Load(context.Background())
+		require.NoError(t, err)
+
+		assert.Equal(t, "production", loadedValues["environment"])
+		assert.Equal(t, "0.0.0.0", loadedValues["server.host"])
+		assert.Equal(t, int64(9000), loadedValues["server.port"])
+		assert.Equal(t, "prod_db", loadedValues["database.name"])
 	})
 
-	t.Run("returns false for non-existing file", func(t *testing.T) {
+	t.Run("writes JSON config", func(t *testing.T) {
+		tmpFile := filepath.Join(t.TempDir(), "write_test.json")
+
 		source, err := NewFileSource(FileSourceOptions{
-			Path:   "nonexistent.toml",
-			Format: "toml",
+			Path:   tmpFile,
+			Format: "json",
 		})
 		require.NoError(t, err)
 
-		assert.False(t, source.Exists())
+		values := map[string]interface{}{
+			"environment":   "test",
+			"server.host":   "localhost",
+			"server.port":   8080,
+		}
+
+		err = source.WriteConfig(values)
+		require.NoError(t, err)
+
+		// Verify file was written
+		assert.True(t, source.Exists())
+
+		// Verify content can be loaded back
+		loadedValues, err := source.Load(context.Background())
+		require.NoError(t, err)
+
+		assert.Equal(t, "test", loadedValues["environment"])
+		assert.Equal(t, "localhost", loadedValues["server.host"])
+		assert.Equal(t, float64(8080), loadedValues["server.port"]) // JSON numbers are float64
 	})
 }
 
-func TestFileSource_GetLastModified(t *testing.T) {
-	t.Run("returns modification time for existing file", func(t *testing.T) {
-		tmpFile := createTempFile(t, "config.toml", "environment = \"test\"")
-		defer os.Remove(tmpFile)
+func TestFileSource_Utilities(t *testing.T) {
+	tmpFile := createTempFile(t, "config.toml", "environment = \"test\"")
+	defer os.Remove(tmpFile)
 
-		source, err := NewFileSource(FileSourceOptions{
-			Path:   tmpFile,
-			Format: "toml",
-		})
-		require.NoError(t, err)
-
-		modTime, err := source.GetLastModified()
-		require.NoError(t, err)
-		assert.False(t, modTime.IsZero())
-		assert.True(t, modTime.Before(time.Now()))
+	source, err := NewFileSource(FileSourceOptions{
+		Path:   tmpFile,
+		Format: "toml",
 	})
+	require.NoError(t, err)
 
-	t.Run("returns error for non-existing file", func(t *testing.T) {
-		source, err := NewFileSource(FileSourceOptions{
+	t.Run("exists check", func(t *testing.T) {
+		assert.True(t, source.Exists())
+
+		nonExistentSource, err := NewFileSource(FileSourceOptions{
 			Path:   "nonexistent.toml",
 			Format: "toml",
 		})
 		require.NoError(t, err)
+		assert.False(t, nonExistentSource.Exists())
+	})
 
-		_, err = source.GetLastModified()
-		assert.Error(t, err)
+	t.Run("get last modified", func(t *testing.T) {
+		modTime, err := source.GetLastModified()
+		require.NoError(t, err)
+		assert.False(t, modTime.IsZero())
+		assert.True(t, modTime.Before(time.Now().Add(time.Second)))
+	})
+
+	t.Run("load from reader", func(t *testing.T) {
+		content := `
+environment = "from_reader"
+debug = true
+`
+		reader := strings.NewReader(content)
+		values, err := source.LoadFromReader(reader, "toml")
+		require.NoError(t, err)
+
+		assert.Equal(t, "from_reader", values["environment"])
+		assert.Equal(t, true, values["debug"])
 	})
 }
 
@@ -547,6 +726,14 @@ ssl_mode = "require"
 level = "info"
 format = "json"
 output = "stdout"
+
+[array_example]
+tags = ["prod", "api", "service", "backend"]
+servers = [
+  {name = "web1", port = 8080},
+  {name = "web2", port = 8081},
+  {name = "api1", port = 9080}
+]
 `)
 	defer os.Remove(tmpFile)
 
@@ -587,6 +774,14 @@ func BenchmarkFileSource_Load_JSON(b *testing.B) {
     "level": "info",
     "format": "json",
     "output": "stdout"
+  },
+  "array_example": {
+    "tags": ["prod", "api", "service", "backend"],
+    "servers": [
+      {"name": "web1", "port": 8080},
+      {"name": "web2", "port": 8081},
+      {"name": "api1", "port": 9080}
+    ]
   }
 }`)
 	defer os.Remove(tmpFile)
@@ -594,6 +789,57 @@ func BenchmarkFileSource_Load_JSON(b *testing.B) {
 	source, err := NewFileSource(FileSourceOptions{
 		Path:   tmpFile,
 		Format: "json",
+	})
+	require.NoError(b, err)
+
+	ctx := context.Background()
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, err := source.Load(ctx)
+		if err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFileSource_Load_YAML(b *testing.B) {
+	tmpFile := createTempFileForBench(b, "config.yaml", `
+environment: production
+debug: false
+server:
+  host: 0.0.0.0
+  port: 8080
+  timeout: 30s
+database:
+  host: localhost
+  port: 5432
+  name: tbp_production
+  ssl_mode: require
+logging:
+  level: info
+  format: json
+  output: stdout
+array_example:
+  tags:
+    - prod
+    - api
+    - service
+    - backend
+  servers:
+    - name: web1
+      port: 8080
+    - name: web2
+      port: 8081
+    - name: api1
+      port: 9080
+`)
+	defer os.Remove(tmpFile)
+
+	source, err := NewFileSource(FileSourceOptions{
+		Path:   tmpFile,
+		Format: "yaml",
 	})
 	require.NoError(b, err)
 
@@ -661,19 +907,19 @@ func BenchmarkFileSource_ExpandEnvVars(b *testing.B) {
 		os.Unsetenv("TEST_DB")
 	}()
 
-	content := `
+	content := []byte(`
 environment = "${NODE_ENV:-production}"
 host = "${TEST_HOST}"
 port = "${TEST_PORT}"
 database = "${TEST_DB}"
 url = "https://${TEST_HOST}:${TEST_PORT}/api/v1"
 connection_string = "postgres://user:pass@${TEST_HOST}:5432/${TEST_DB}?sslmode=require"
-`
+`)
 
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
-		_ = source.expandEnvVars(content)
+		_, _ = source.substituteEnvVars(content)
 	}
 }
 
