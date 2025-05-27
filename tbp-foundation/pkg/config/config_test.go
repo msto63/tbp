@@ -5,19 +5,20 @@
 //              hot-reloading, and struct unmarshaling. Tests cover edge cases,
 //              concurrency, and performance characteristics.
 // Author: msto63 with Claude Sonnet 4.0
-// Version: v0.1.1
+// Version: v0.1.2
 // Created: 2025-05-26
 // Modified: 2025-05-27
 //
 // Change History:
 // - 2025-05-26 v0.1.0: Initial test implementation with comprehensive coverage
 // - 2025-05-27 v0.1.1: Updated for interface segregation and enhanced validation
+// - 2025-05-27 v0.1.2: Fixed compilation errors - missing imports and type issues
 
 package config
 
 import (
 	"context"
-	"strings"
+	"fmt"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ import (
 func TestNew(t *testing.T) {
 	t.Run("creates config with defaults", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		config, err := New(ctx, LoadOptions{
 			Environment: "test",
 			EnvPrefix:   "TEST",
@@ -37,51 +38,51 @@ func TestNew(t *testing.T) {
 				"debug":       false,
 			},
 		})
-		
+
 		require.NoError(t, err)
 		assert.NotNil(t, config)
-		
+
 		// Check default values are loaded
 		port, err := config.GetInt("server.port")
 		assert.NoError(t, err)
 		assert.Equal(t, 8080, port)
-		
+
 		debug, err := config.GetBool("debug")
 		assert.NoError(t, err)
 		assert.False(t, debug)
-		
+
 		// Check environment
 		assert.Equal(t, "test", config.GetEnvironment())
 	})
 
 	t.Run("handles missing environment gracefully", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		config, err := New(ctx, LoadOptions{
 			Environment: "test",
 			EnvPrefix:   "NONEXISTENT",
 		})
-		
+
 		require.NoError(t, err)
 		assert.NotNil(t, config)
 	})
 
 	t.Run("fails on missing required sources", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		_, err := New(ctx, LoadOptions{
 			Environment:   "test",
 			ConfigPaths:   []string{"nonexistent.toml"},
 			FailOnMissing: true,
 		})
-		
+
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to create file source")
 	})
 
 	t.Run("handles validation failure", func(t *testing.T) {
 		ctx := context.Background()
-		
+
 		metadata := &Metadata{
 			Name:        "test-config",
 			Environment: "test",
@@ -94,11 +95,11 @@ func TestNew(t *testing.T) {
 		}
 
 		_, err := New(ctx, LoadOptions{
-			Environment:   "test",
-			Validation:    true,
-			Metadata:      metadata,
+			Environment: "test",
+			Validation:  true,
+			Metadata:    metadata,
 		})
-		
+
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "configuration validation failed")
 	})
@@ -444,7 +445,7 @@ func TestConfig_AddSource(t *testing.T) {
 
 		err := config.AddSource(lowPrioritySource)
 		assert.NoError(t, err)
-		
+
 		err = config.AddSource(highPrioritySource)
 		assert.NoError(t, err)
 
@@ -516,7 +517,7 @@ func TestConfig_Validation(t *testing.T) {
 				"test.number": {
 					Name:     "test.number",
 					Type:     "integer",
-					MinValue: 50,  // test.number is 42, should fail
+					MinValue: 50, // test.number is 42, should fail
 					MaxValue: 100,
 				},
 			},
@@ -549,11 +550,13 @@ func TestConfig_Validation(t *testing.T) {
 
 	t.Run("runs custom validators", func(t *testing.T) {
 		config := createTestConfig(t)
-		
-		// Add a custom validator that fails
-		config.AddValidator(func(key, value string) error {
-			if key == "test.key" && value == "test_value" {
-				return fmt.Errorf("custom validation failed")
+
+		// Add a custom validator that fails - Fixed signature
+		config.AddValidator(func(key string, value interface{}) error {
+			if key == "test.key" {
+				if strValue, ok := value.(string); ok && strValue == "test_value" {
+					return fmt.Errorf("custom validation failed")
+				}
 			}
 			return nil
 		})
@@ -566,7 +569,7 @@ func TestConfig_Validation(t *testing.T) {
 
 func TestConfig_Watcher(t *testing.T) {
 	config := createTestConfig(t)
-	
+
 	t.Run("notifies watchers of changes", func(t *testing.T) {
 		watcher := &mockWatcher{changes: make(chan map[string]ConfigChange, 1)}
 		config.AddWatcher(watcher)
@@ -593,17 +596,17 @@ func TestConfig_Watcher(t *testing.T) {
 		case changes := <-watcher.changes:
 			assert.Contains(t, changes, "test.key")
 			assert.Contains(t, changes, "new.key")
-			
+
 			// Check change types
 			testKeyChange := changes["test.key"]
 			assert.Equal(t, ChangeActionUpdate, testKeyChange.Action)
 			assert.Equal(t, "test_value", testKeyChange.OldValue)
 			assert.Equal(t, "updated_value", testKeyChange.NewValue)
-			
+
 			newKeyChange := changes["new.key"]
 			assert.Equal(t, ChangeActionAdd, newKeyChange.Action)
 			assert.Equal(t, "new_value", newKeyChange.NewValue)
-			
+
 		case <-time.After(1 * time.Second):
 			t.Fatal("Did not receive change notification")
 		}
@@ -744,11 +747,169 @@ func TestConfig_Close(t *testing.T) {
 	assert.Empty(t, keys)
 }
 
+// Test hot-reloading functionality
+func TestConfig_HotReload(t *testing.T) {
+	t.Run("starts watching when enabled", func(t *testing.T) {
+		ctx := context.Background()
+
+		watchableSource := &mockWatchableSource{
+			mockSource: mockSource{
+				name:     "watchable",
+				priority: 50,
+				values:   map[string]interface{}{"test.key": "initial"},
+			},
+		}
+
+		config, err := New(ctx, LoadOptions{
+			Environment: "test",
+			Sources:     []Source{watchableSource},
+			HotReload:   true,
+		})
+		require.NoError(t, err)
+
+		// Verify initial value
+		value, exists := config.Get("test.key")
+		assert.True(t, exists)
+		assert.Equal(t, "initial", value)
+
+		// Add watcher to detect changes
+		watcher := &mockWatcher{changes: make(chan map[string]ConfigChange, 1)}
+		config.AddWatcher(watcher)
+
+		// Simulate source change
+		watchableSource.values["test.key"] = "updated"
+		watchableSource.TriggerChange(watchableSource.values)
+
+		// Wait for change notification
+		select {
+		case changes := <-watcher.changes:
+			assert.Contains(t, changes, "test.key")
+			change := changes["test.key"]
+			assert.Equal(t, ChangeActionUpdate, change.Action)
+			assert.Equal(t, "updated", change.NewValue)
+		case <-time.After(1 * time.Second):
+			t.Fatal("Did not receive change notification")
+		}
+	})
+}
+
+// Test concurrent access
+func TestConfig_ConcurrentAccess(t *testing.T) {
+	config := createTestConfig(t)
+
+	t.Run("concurrent reads", func(t *testing.T) {
+		const numGoroutines = 100
+		done := make(chan bool, numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func() {
+				defer func() { done <- true }()
+
+				// Read various values
+				_, _ = config.GetString("test.key")
+				_, _ = config.GetInt("test.number")
+				_, _ = config.GetBool("test.enabled")
+				_ = config.GetAll()
+				_ = config.GetKeys()
+			}()
+		}
+
+		// Wait for all goroutines to complete
+		for i := 0; i < numGoroutines; i++ {
+			select {
+			case <-done:
+				// Success
+			case <-time.After(5 * time.Second):
+				t.Fatal("Concurrent reads timed out")
+			}
+		}
+	})
+
+	t.Run("concurrent writes", func(t *testing.T) {
+		const numGoroutines = 10
+		done := make(chan bool, numGoroutines)
+
+		for i := 0; i < numGoroutines; i++ {
+			go func(id int) {
+				defer func() { done <- true }()
+
+				// Add sources concurrently
+				source := &mockSource{
+					name:     fmt.Sprintf("concurrent-%d", id),
+					priority: 60 + id,
+					values: map[string]interface{}{
+						fmt.Sprintf("key.%d", id): fmt.Sprintf("value-%d", id),
+					},
+				}
+
+				_ = config.AddSource(source)
+				_ = config.Load(context.Background())
+			}(i)
+		}
+
+		// Wait for all goroutines to complete
+		for i := 0; i < numGoroutines; i++ {
+			select {
+			case <-done:
+				// Success
+			case <-time.After(5 * time.Second):
+				t.Fatal("Concurrent writes timed out")
+			}
+		}
+	})
+}
+
+// Test error conditions
+func TestConfig_ErrorConditions(t *testing.T) {
+	config := createTestConfig(t)
+
+	t.Run("handles source load errors", func(t *testing.T) {
+		errorSource := &mockErrorSource{
+			mockSource: mockSource{name: "error", priority: 60},
+			loadError:  fmt.Errorf("mock load error"),
+		}
+
+		err := config.AddSource(errorSource)
+		require.NoError(t, err)
+
+		err = config.Load(context.Background())
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "mock load error")
+	})
+
+	t.Run("handles watcher panics gracefully", func(t *testing.T) {
+		panicWatcher := &mockPanicWatcher{}
+		config.AddWatcher(panicWatcher)
+
+		// Add source to trigger change
+		source := &mockSource{
+			name:     "trigger",
+			priority: 70,
+			values:   map[string]interface{}{"new.key": "new.value"},
+		}
+
+		err := config.AddSource(source)
+		require.NoError(t, err)
+
+		// This should not panic the main thread
+		err = config.Load(context.Background())
+		assert.NoError(t, err)
+
+		// Give watcher time to panic
+		time.Sleep(100 * time.Millisecond)
+
+		// Config should still be functional
+		value, exists := config.Get("new.key")
+		assert.True(t, exists)
+		assert.Equal(t, "new.value", value)
+	})
+}
+
 // Helper functions and mock implementations
 
 func createTestConfig(t *testing.T) *Config {
 	ctx := context.Background()
-	
+
 	// Create a mock source with test data
 	mockSrc := &mockSource{
 		name:     "mock",
@@ -785,13 +946,13 @@ func createTestConfig(t *testing.T) *Config {
 		Sources:     []Source{mockSrc},
 	})
 	require.NoError(t, err)
-	
+
 	return config
 }
 
 func createTestConfigWithMetadata(t *testing.T) *Config {
 	ctx := context.Background()
-	
+
 	metadata := &Metadata{
 		Name:        "test-config",
 		Environment: "test",
@@ -817,13 +978,13 @@ func createTestConfigWithMetadata(t *testing.T) *Config {
 		Metadata:    metadata,
 	})
 	require.NoError(t, err)
-	
+
 	return config
 }
 
 func createTestConfigWithMissingRequired(t *testing.T) *Config {
 	ctx := context.Background()
-	
+
 	metadata := &Metadata{
 		Name:        "test-config",
 		Environment: "test",
@@ -848,13 +1009,13 @@ func createTestConfigWithMissingRequired(t *testing.T) *Config {
 		Validation:  false, // Don't validate during creation
 	})
 	require.NoError(t, err)
-	
+
 	return config
 }
 
 func createTestConfigWithCustomMetadata(t *testing.T, metadata *Metadata) *Config {
 	ctx := context.Background()
-	
+
 	mockSrc := &mockSource{
 		name:     "mock",
 		priority: 50,
@@ -871,7 +1032,7 @@ func createTestConfigWithCustomMetadata(t *testing.T, metadata *Metadata) *Confi
 		Validation:  false, // Don't validate during creation
 	})
 	require.NoError(t, err)
-	
+
 	return config
 }
 
@@ -960,164 +1121,6 @@ func (m *mockWatcher) OnConfigChange(ctx context.Context, changes map[string]Con
 	}
 }
 
-// Test hot-reloading functionality
-func TestConfig_HotReload(t *testing.T) {
-	t.Run("starts watching when enabled", func(t *testing.T) {
-		ctx := context.Background()
-		
-		watchableSource := &mockWatchableSource{
-			mockSource: mockSource{
-				name:     "watchable",
-				priority: 50,
-				values:   map[string]interface{}{"test.key": "initial"},
-			},
-		}
-
-		config, err := New(ctx, LoadOptions{
-			Environment: "test",
-			Sources:     []Source{watchableSource},
-			HotReload:   true,
-		})
-		require.NoError(t, err)
-
-		// Verify initial value
-		value, exists := config.Get("test.key")
-		assert.True(t, exists)
-		assert.Equal(t, "initial", value)
-
-		// Add watcher to detect changes
-		watcher := &mockWatcher{changes: make(chan map[string]ConfigChange, 1)}
-		config.AddWatcher(watcher)
-
-		// Simulate source change
-		watchableSource.values["test.key"] = "updated"
-		watchableSource.TriggerChange(watchableSource.values)
-
-		// Wait for change notification
-		select {
-		case changes := <-watcher.changes:
-			assert.Contains(t, changes, "test.key")
-			change := changes["test.key"]
-			assert.Equal(t, ChangeActionUpdate, change.Action)
-			assert.Equal(t, "updated", change.NewValue)
-		case <-time.After(1 * time.Second):
-			t.Fatal("Did not receive change notification")
-		}
-	})
-}
-
-// Test concurrent access
-func TestConfig_ConcurrentAccess(t *testing.T) {
-	config := createTestConfig(t)
-	
-	t.Run("concurrent reads", func(t *testing.T) {
-		const numGoroutines = 100
-		done := make(chan bool, numGoroutines)
-		
-		for i := 0; i < numGoroutines; i++ {
-			go func() {
-				defer func() { done <- true }()
-				
-				// Read various values
-				_, _ = config.GetString("test.key")
-				_, _ = config.GetInt("test.number")
-				_, _ = config.GetBool("test.enabled")
-				_ = config.GetAll()
-				_ = config.GetKeys()
-			}()
-		}
-		
-		// Wait for all goroutines to complete
-		for i := 0; i < numGoroutines; i++ {
-			select {
-			case <-done:
-				// Success
-			case <-time.After(5 * time.Second):
-				t.Fatal("Concurrent reads timed out")
-			}
-		}
-	})
-	
-	t.Run("concurrent writes", func(t *testing.T) {
-		const numGoroutines = 10
-		done := make(chan bool, numGoroutines)
-		
-		for i := 0; i < numGoroutines; i++ {
-			go func(id int) {
-				defer func() { done <- true }()
-				
-				// Add sources concurrently
-				source := &mockSource{
-					name:     fmt.Sprintf("concurrent-%d", id),
-					priority: 60 + id,
-					values: map[string]interface{}{
-						fmt.Sprintf("key.%d", id): fmt.Sprintf("value-%d", id),
-					},
-				}
-				
-				_ = config.AddSource(source)
-				_ = config.Load(context.Background())
-			}(i)
-		}
-		
-		// Wait for all goroutines to complete
-		for i := 0; i < numGoroutines; i++ {
-			select {
-			case <-done:
-				// Success
-			case <-time.After(5 * time.Second):
-				t.Fatal("Concurrent writes timed out")
-			}
-		}
-	})
-}
-
-// Test error conditions
-func TestConfig_ErrorConditions(t *testing.T) {
-	config := createTestConfig(t)
-	
-	t.Run("handles source load errors", func(t *testing.T) {
-		errorSource := &mockErrorSource{
-			mockSource: mockSource{name: "error", priority: 60},
-			loadError:  fmt.Errorf("mock load error"),
-		}
-		
-		err := config.AddSource(errorSource)
-		require.NoError(t, err)
-		
-		err = config.Load(context.Background())
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "mock load error")
-	})
-	
-	t.Run("handles watcher panics gracefully", func(t *testing.T) {
-		panicWatcher := &mockPanicWatcher{}
-		config.AddWatcher(panicWatcher)
-		
-		// Add source to trigger change
-		source := &mockSource{
-			name:     "trigger",
-			priority: 70,
-			values:   map[string]interface{}{"new.key": "new.value"},
-		}
-		
-		err := config.AddSource(source)
-		require.NoError(t, err)
-		
-		// This should not panic the main thread
-		err = config.Load(context.Background())
-		assert.NoError(t, err)
-		
-		// Give watcher time to panic
-		time.Sleep(100 * time.Millisecond)
-		
-		// Config should still be functional
-		value, exists := config.Get("new.key")
-		assert.True(t, exists)
-		assert.Equal(t, "new.value", value)
-	})
-}
-
 // Mock error source for testing error conditions
 type mockErrorSource struct {
 	mockSource
@@ -1140,8 +1143,8 @@ func (m *mockPanicWatcher) OnConfigChange(ctx context.Context, changes map[strin
 
 // Benchmark tests for performance validation
 func BenchmarkConfig_Get(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1150,8 +1153,8 @@ func BenchmarkConfig_Get(b *testing.B) {
 }
 
 func BenchmarkConfig_GetString(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1160,8 +1163,8 @@ func BenchmarkConfig_GetString(b *testing.B) {
 }
 
 func BenchmarkConfig_GetInt(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1170,8 +1173,8 @@ func BenchmarkConfig_GetInt(b *testing.B) {
 }
 
 func BenchmarkConfig_GetBool(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1180,8 +1183,8 @@ func BenchmarkConfig_GetBool(b *testing.B) {
 }
 
 func BenchmarkConfig_GetDuration(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1190,12 +1193,12 @@ func BenchmarkConfig_GetDuration(b *testing.B) {
 }
 
 func BenchmarkConfig_Unmarshal(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	type TestConfig struct {
-		Key     string `config:"test.key"`
-		Number  int    `config:"test.number"`
-		Enabled bool   `config:"test.enabled"`
+		Key     string        `config:"test.key"`
+		Number  int           `config:"test.number"`
+		Enabled bool          `config:"test.enabled"`
 		Timeout time.Duration `config:"test.timeout"`
 	}
 
@@ -1209,8 +1212,8 @@ func BenchmarkConfig_Unmarshal(b *testing.B) {
 
 func BenchmarkConfig_Load(b *testing.B) {
 	ctx := context.Background()
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1220,8 +1223,8 @@ func BenchmarkConfig_Load(b *testing.B) {
 
 func BenchmarkConfig_Validate(b *testing.B) {
 	ctx := context.Background()
-	config := createTestConfigWithMetadata(b.(*testing.T))
-	
+	config := createBenchConfigWithMetadata()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1230,8 +1233,8 @@ func BenchmarkConfig_Validate(b *testing.B) {
 }
 
 func BenchmarkConfig_AddSource(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1242,14 +1245,14 @@ func BenchmarkConfig_AddSource(b *testing.B) {
 			values:   map[string]interface{}{"key": fmt.Sprintf("value-%d", i)},
 		}
 		b.StartTimer()
-		
+
 		_ = config.AddSource(source)
 	}
 }
 
 func BenchmarkConfig_GetAll(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1258,8 +1261,8 @@ func BenchmarkConfig_GetAll(b *testing.B) {
 }
 
 func BenchmarkConfig_GetKeys(b *testing.B) {
-	config := createTestConfig(b.(*testing.T))
-	
+	config := createBenchConfig()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -1268,11 +1271,91 @@ func BenchmarkConfig_GetKeys(b *testing.B) {
 }
 
 func BenchmarkConfig_Summary(b *testing.B) {
-	config := createTestConfigWithMetadata(b.(*testing.T))
-	
+	config := createBenchConfigWithMetadata()
+
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		_ = config.Summary()
 	}
+}
+
+// Helper functions for benchmarks
+func createBenchConfig() *Config {
+	ctx := context.Background()
+
+	// Create a mock source with test data
+	mockSrc := &mockSource{
+		name:     "mock",
+		priority: 50,
+		values: map[string]interface{}{
+			"test.key":           "test_value",
+			"test.number":        42,
+			"test.string_number": "123",
+			"test.enabled":       true,
+			"test.timeout":       "30s",
+			"test.bool_true":     "true",
+			"test.bool_false":    "false",
+			"test.bool_yes":      "yes",
+			"test.bool_no":       "no",
+			"test.bool_1":        "1",
+			"test.bool_0":        "0",
+			"test.server.host":   "localhost",
+			"test.server.port":   8080,
+			"test.int32":         int32(2147483647),
+			"test.int64":         int64(1000),
+			"test.float_to_int":  99.9,
+			"test.zero":          0,
+			"test.float_seconds": 2.5,
+			"test.created_at":    "2024-01-15T10:30:00Z",
+			"test.small_int":     127,
+			"test.unsigned":      uint32(12345),
+			"test.float_val":     3.14,
+			"test.large_number":  300,
+		},
+	}
+
+	config, err := New(ctx, LoadOptions{
+		Environment: "test",
+		Sources:     []Source{mockSrc},
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return config
+}
+
+func createBenchConfigWithMetadata() *Config {
+	ctx := context.Background()
+
+	metadata := &Metadata{
+		Name:        "test-config",
+		Environment: "test",
+		Fields: map[string]Field{
+			"required.field": {
+				Name:     "required.field",
+				Required: true,
+			},
+		},
+	}
+
+	mockSrc := &mockSource{
+		name:     "mock",
+		priority: 50,
+		values: map[string]interface{}{
+			"required.field": "present",
+		},
+	}
+
+	config, err := New(ctx, LoadOptions{
+		Environment: "test",
+		Sources:     []Source{mockSrc},
+		Metadata:    metadata,
+	})
+	if err != nil {
+		panic(err)
+	}
+
+	return config
 }
